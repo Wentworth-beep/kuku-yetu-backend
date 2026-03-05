@@ -13,7 +13,7 @@ const corsOptions = {
   origin: [
     "http://localhost:5000",
     "http://localhost:3000",
-    "https://kuku-yetu-epbq.onrender.com",
+    "https://kukuyetu.netlify.app" 
     "https://kukuyetu.onrender.com"
     "https://kuku-yetu-frontend.netlify.app" 
   ],
