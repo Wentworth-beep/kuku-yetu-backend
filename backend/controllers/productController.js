@@ -18,15 +18,24 @@ const generateProductId = () => {
 // @access  Public
 const getProducts = async (req, res) => {
   try {
-    console.log('Getting all products');
+    console.log('📦 Getting all products');
     const products = await Product.findAll();
+    
+    // Ensure images are properly formatted
+    const formattedProducts = products.map(product => {
+      if (product.images && !Array.isArray(product.images)) {
+        product.images = [product.images];
+      }
+      return product;
+    });
+    
     res.json({
       success: true,
-      count: products.length,
-      products
+      count: formattedProducts.length,
+      products: formattedProducts
     });
   } catch (err) {
-    console.error('Get products error:', err.message);
+    console.error('❌ Get products error:', err.message);
     res.status(500).json({ 
       success: false,
       message: 'Server error: ' + err.message
@@ -41,14 +50,14 @@ const getProductById = async (req, res) => {
   try {
     const { id } = req.params;
     
-    // Check if ID contains colon and clean it (fixes the 14:1 issue)
+    // Clean the ID (remove anything after colon)
     let cleanId = id;
     if (id.includes(':')) {
       cleanId = id.split(':')[0];
-      console.log(`Cleaned product ID from ${id} to ${cleanId}`);
+      console.log(`🔧 Cleaned product ID from ${id} to ${cleanId}`);
     }
     
-    // Validate that cleanId is a number
+    // Convert to number
     const productId = parseInt(cleanId);
     if (isNaN(productId)) {
       return res.status(400).json({ 
@@ -66,12 +75,17 @@ const getProductById = async (req, res) => {
       });
     }
 
+    // Ensure images is an array
+    if (product.images && !Array.isArray(product.images)) {
+      product.images = [product.images];
+    }
+
     res.json({
       success: true,
       product
     });
   } catch (err) {
-    console.error('Get product error:', err.message);
+    console.error('❌ Get product error:', err.message);
     res.status(500).json({ 
       success: false,
       message: 'Server error: ' + err.message
@@ -93,12 +107,17 @@ const getProductByCode = async (req, res) => {
       });
     }
 
+    // Ensure images is an array
+    if (product.images && !Array.isArray(product.images)) {
+      product.images = [product.images];
+    }
+
     res.json({
       success: true,
       product
     });
   } catch (err) {
-    console.error('Get product by code error:', err.message);
+    console.error('❌ Get product by code error:', err.message);
     res.status(500).json({ 
       success: false,
       message: 'Server error: ' + err.message
@@ -113,13 +132,21 @@ const getProductsByCategory = async (req, res) => {
   try {
     const products = await Product.findByCategory(req.params.category);
     
+    // Ensure images are properly formatted
+    const formattedProducts = products.map(product => {
+      if (product.images && !Array.isArray(product.images)) {
+        product.images = [product.images];
+      }
+      return product;
+    });
+    
     res.json({
       success: true,
-      count: products.length,
-      products
+      count: formattedProducts.length,
+      products: formattedProducts
     });
   } catch (err) {
-    console.error('Get products by category error:', err.message);
+    console.error('❌ Get products by category error:', err.message);
     res.status(500).json({ 
       success: false,
       message: 'Server error: ' + err.message
@@ -144,13 +171,21 @@ const searchProducts = async (req, res) => {
 
     const products = await Product.search(q);
     
+    // Ensure images are properly formatted
+    const formattedProducts = products.map(product => {
+      if (product.images && !Array.isArray(product.images)) {
+        product.images = [product.images];
+      }
+      return product;
+    });
+    
     res.json({
       success: true,
-      count: products.length,
-      products
+      count: formattedProducts.length,
+      products: formattedProducts
     });
   } catch (err) {
-    console.error('Search products error:', err.message);
+    console.error('❌ Search products error:', err.message);
     res.status(500).json({ 
       success: false,
       message: 'Server error: ' + err.message
@@ -179,7 +214,7 @@ const createProduct = async (req, res) => {
     // Generate unique product ID
     const product_id = generateProductId();
 
-    // Process images
+    // Process images - ensure they're stored as array with /uploads/ prefix
     const images = req.files ? req.files.map(file => `/uploads/${file.filename}`) : [];
 
     const product = await Product.create({
@@ -200,7 +235,7 @@ const createProduct = async (req, res) => {
       product
     });
   } catch (err) {
-    console.error('Create product error:', err.message);
+    console.error('❌ Create product error:', err.message);
     res.status(500).json({ 
       success: false,
       message: 'Server error: ' + err.message
@@ -300,7 +335,7 @@ const updateProduct = async (req, res) => {
       product: result.rows[0]
     });
   } catch (err) {
-    console.error('Update product error:', err.message);
+    console.error('❌ Update product error:', err.message);
     res.status(500).json({ 
       success: false,
       message: 'Server error: ' + err.message
@@ -324,9 +359,8 @@ const deleteProduct = async (req, res) => {
       });
     }
 
-    // First delete any favorites that reference this product
+    // Delete any favorites that reference this product
     try {
-      // Check if favorites table exists
       const tableCheck = await pool.query(`
         SELECT EXISTS (
           SELECT FROM information_schema.tables 
@@ -336,20 +370,10 @@ const deleteProduct = async (req, res) => {
       
       if (tableCheck.rows[0].exists) {
         await pool.query('DELETE FROM favorites WHERE product_id = $1', [productId]);
-        console.log(`Deleted favorites for product ${productId}`);
+        console.log(`✅ Deleted favorites for product ${productId}`);
       }
     } catch (favError) {
-      console.log('Favorites table might not exist or other error:', favError.message);
-      // Continue with deletion even if favorites table doesn't exist
-    }
-
-    // Also check for orders that might reference this product
-    try {
-      // This is more complex - products in orders are stored as JSON
-      // We'll just log a warning instead of blocking deletion
-      console.log(`Note: Product ${productId} may exist in order histories`);
-    } catch (orderError) {
-      console.log('Error checking orders:', orderError.message);
+      console.log('⚠️ Favorites table error:', favError.message);
     }
 
     // Delete associated images from filesystem
@@ -359,7 +383,7 @@ const deleteProduct = async (req, res) => {
           const fullPath = path.join(__dirname, '..', imagePath);
           if (fs.existsSync(fullPath)) {
             fs.unlinkSync(fullPath);
-            console.log(`Deleted image: ${fullPath}`);
+            console.log(`✅ Deleted image: ${fullPath}`);
           }
         } catch (fileError) {
           console.error('Error deleting image file:', fileError.message);
@@ -377,11 +401,10 @@ const deleteProduct = async (req, res) => {
   } catch (err) {
     console.error('Delete product error:', err.message);
     
-    // Check if it's a foreign key constraint error
     if (err.code === '23503') {
       return res.status(400).json({ 
         success: false,
-        message: 'Cannot delete product because it is referenced in orders or favorites. You may need to delete those records first.' 
+        message: 'Cannot delete product because it is referenced in orders or favorites.' 
       });
     }
     
@@ -397,7 +420,6 @@ const deleteProduct = async (req, res) => {
 // @access  Public
 const getFeaturedProducts = async (req, res) => {
   try {
-    // Check if created_at column exists
     const columnCheck = await pool.query(`
       SELECT column_name 
       FROM information_schema.columns 
@@ -412,14 +434,22 @@ const getFeaturedProducts = async (req, res) => {
     }
     
     const result = await pool.query(query);
+    
+    // Ensure images are properly formatted
+    const products = result.rows.map(product => {
+      if (product.images && !Array.isArray(product.images)) {
+        product.images = [product.images];
+      }
+      return product;
+    });
 
     res.json({
       success: true,
-      count: result.rows.length,
-      products: result.rows
+      count: products.length,
+      products
     });
   } catch (err) {
-    console.error('Get featured products error:', err.message);
+    console.error('❌ Get featured products error:', err.message);
     res.status(500).json({ 
       success: false,
       message: 'Server error: ' + err.message
@@ -439,13 +469,21 @@ const getProductsByPriceRange = async (req, res) => {
       [min || 0, max || 999999]
     );
 
+    // Ensure images are properly formatted
+    const products = result.rows.map(product => {
+      if (product.images && !Array.isArray(product.images)) {
+        product.images = [product.images];
+      }
+      return product;
+    });
+
     res.json({
       success: true,
-      count: result.rows.length,
-      products: result.rows
+      count: products.length,
+      products
     });
   } catch (err) {
-    console.error('Get products by price range error:', err.message);
+    console.error(' Get products by price range error:', err.message);
     res.status(500).json({ 
       success: false,
       message: 'Server error: ' + err.message
@@ -479,7 +517,7 @@ const updateProductStock = async (req, res) => {
       product: result.rows[0]
     });
   } catch (err) {
-    console.error('Update product stock error:', err.message);
+    console.error(' Update product stock error:', err.message);
     res.status(500).json({ 
       success: false,
       message: 'Server error: ' + err.message
