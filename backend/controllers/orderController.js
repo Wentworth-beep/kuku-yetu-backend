@@ -1,5 +1,23 @@
 const pool = require('../config/database');
-
+// In createOrder function, before inserting, check if order_id column exists
+const createOrder = async (req, res) => {
+  try {
+    console.log('Creating new order for user:', req.user.id);
+    // ... rest of your code
+    
+    // Before inserting, check if required columns exist
+    const columnCheck = await pool.query(`
+      SELECT column_name 
+      FROM information_schema.columns 
+      WHERE table_name='orders'
+    `);
+    
+    const columns = columnCheck.rows.map(col => col.column_name);
+    console.log('Orders table columns:', columns);
+    
+    // ... rest of your insert logic
+  }
+}
 // Generate order ID
 const generateOrderId = () => {
   return 'ORD-' + Date.now() + '-' + Math.random().toString(36).substr(2, 6).toUpperCase();
