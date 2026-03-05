@@ -15,6 +15,7 @@ const corsOptions = {
     "http://localhost:3000",
     "https://kuku-yetu-epbq.onrender.com",
     "https://kukuyetu.onrender.com"
+    "https://kuku-yetu-frontend.netlify.app" 
   ],
   credentials: true,
   optionsSuccessStatus: 200
