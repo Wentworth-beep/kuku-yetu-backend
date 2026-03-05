@@ -1,23 +1,5 @@
 const pool = require('../config/database');
-// In createOrder function, before inserting, check if order_id column exists
-const createOrder = async (req, res) => {
-  try {
-    console.log('Creating new order for user:', req.user.id);
-    // ... rest of your code
-    
-    // Before inserting, check if required columns exist
-    const columnCheck = await pool.query(`
-      SELECT column_name 
-      FROM information_schema.columns 
-      WHERE table_name='orders'
-    `);
-    
-    const columns = columnCheck.rows.map(col => col.column_name);
-    console.log('Orders table columns:', columns);
-    
-    // ... rest of your insert logic
-  }
-}
+
 // Generate order ID
 const generateOrderId = () => {
   return 'ORD-' + Date.now() + '-' + Math.random().toString(36).substr(2, 6).toUpperCase();
@@ -66,34 +48,73 @@ const createOrder = async (req, res) => {
     const productsJson = JSON.stringify(cleanProducts);
     const cleanTotalAmount = parseFloat(total_amount);
 
-    // Insert into database
-    const query = `
-      INSERT INTO orders 
-      (order_id, user_id, customer_name, phone, alternative_phone, 
-       location, specific_address, products, total_amount, status, created_at)
-      VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, NOW())
-      RETURNING *
-    `;
+    // First check if order_id column exists
+    const columnCheck = await pool.query(`
+      SELECT column_name 
+      FROM information_schema.columns 
+      WHERE table_name='orders' AND column_name='order_id'
+    `);
 
-    const values = [
-      order_id,
-      req.user.id,
-      customer_name,
-      phone,
-      alternative_phone || null,
-      location,
-      specific_address || null,
-      productsJson,
-      cleanTotalAmount,
-      'pending'
-    ];
+    let query;
+    let values;
+
+    if (columnCheck.rows.length > 0) {
+      // order_id column exists
+      query = `
+        INSERT INTO orders 
+        (order_id, user_id, customer_name, phone, alternative_phone, 
+         location, specific_address, products, total_amount, status, created_at)
+        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, NOW())
+        RETURNING *
+      `;
+      values = [
+        order_id,
+        req.user.id,
+        customer_name,
+        phone,
+        alternative_phone || null,
+        location,
+        specific_address || null,
+        productsJson,
+        cleanTotalAmount,
+        'pending'
+      ];
+    } else {
+      // order_id column doesn't exist - use a different approach
+      console.log('order_id column missing, using id as order_id');
+      query = `
+        INSERT INTO orders 
+        (user_id, customer_name, phone, alternative_phone, 
+         location, specific_address, products, total_amount, status, created_at)
+        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, NOW())
+        RETURNING *
+      `;
+      values = [
+        req.user.id,
+        customer_name,
+        phone,
+        alternative_phone || null,
+        location,
+        specific_address || null,
+        productsJson,
+        cleanTotalAmount,
+        'pending'
+      ];
+    }
 
     const result = await pool.query(query, values);
     const newOrder = result.rows[0];
-    console.log('Order inserted successfully:', newOrder.order_id);
+    
+    // Add order_id to response if it doesn't exist in DB
+    if (!newOrder.order_id) {
+      newOrder.order_id = order_id;
+    }
+    
+    console.log('Order inserted successfully:', newOrder.order_id || newOrder.id);
 
     // Create notification for new order
     try {
+      // Check if notifications table has the right columns
       const notifQuery = `
         INSERT INTO notifications (user_id, title, message, type, is_read, created_at)
         VALUES ($1, $2, $3, $4, false, NOW())
@@ -103,7 +124,7 @@ const createOrder = async (req, res) => {
       await pool.query(notifQuery, [
         req.user.id,
         'Order Received',
-        `Your order #${order_id} has been received and is pending confirmation.`,
+        `Your order #${newOrder.order_id || newOrder.id} has been received and is pending confirmation.`,
         'order'
       ]);
       
@@ -149,7 +170,7 @@ const getAllOrders = async (req, res) => {
   try {
     console.log('Fetching all orders for admin');
     
-    // First check if orders table exists
+    // Check if orders table exists
     const tableCheck = await pool.query(`
       SELECT EXISTS (
         SELECT FROM information_schema.tables 
@@ -170,12 +191,13 @@ const getAllOrders = async (req, res) => {
     const columnCheck = await pool.query(`
       SELECT column_name 
       FROM information_schema.columns 
-      WHERE table_name='orders' AND column_name='created_at'
+      WHERE table_name='orders'
     `);
     
+    const columns = columnCheck.rows.map(col => col.column_name);
+    
     let query;
-    if (columnCheck.rows.length > 0) {
-      // created_at exists - use it for ordering
+    if (columns.includes('created_at')) {
       query = `
         SELECT o.*, u.full_name as user_name, u.email as user_email
         FROM orders o 
@@ -183,8 +205,6 @@ const getAllOrders = async (req, res) => {
         ORDER BY o.created_at DESC
       `;
     } else {
-      // created_at doesn't exist - order by id instead
-      console.log('created_at column missing, ordering by id');
       query = `
         SELECT o.*, u.full_name as user_name, u.email as user_email
         FROM orders o 
@@ -241,11 +261,13 @@ const getUserOrders = async (req, res) => {
     const columnCheck = await pool.query(`
       SELECT column_name 
       FROM information_schema.columns 
-      WHERE table_name='orders' AND column_name='created_at'
+      WHERE table_name='orders'
     `);
     
+    const columns = columnCheck.rows.map(col => col.column_name);
+    
     let query;
-    if (columnCheck.rows.length > 0) {
+    if (columns.includes('created_at')) {
       query = `
         SELECT * FROM orders 
         WHERE user_id = $1 
@@ -401,26 +423,26 @@ const updateOrderStatus = async (req, res) => {
       switch (status) {
         case 'confirmed':
           notificationTitle = 'Order Confirmed';
-          notificationMessage = `Your order #${order.order_id} has been confirmed and is being processed.`;
+          notificationMessage = `Your order #${order.order_id || order.id} has been confirmed and is being processed.`;
           break;
         case 'shipped':
           notificationTitle = 'Order Shipped';
-          notificationMessage = `Great news! Your order #${order.order_id} has been shipped and is on its way!`;
+          notificationMessage = `Great news! Your order #${order.order_id || order.id} has been shipped and is on its way!`;
           break;
         case 'delivered':
           notificationTitle = 'Order Delivered';
-          notificationMessage = `Your order #${order.order_id} has been delivered. Thank you for shopping with us!`;
+          notificationMessage = `Your order #${order.order_id || order.id} has been delivered. Thank you for shopping with us!`;
           break;
         case 'completed':
           notificationTitle = 'Order Completed';
-          notificationMessage = `Your order #${order.order_id} is now complete. We hope you enjoy your products!`;
+          notificationMessage = `Your order #${order.order_id || order.id} is now complete. We hope you enjoy your products!`;
           break;
         case 'cancelled':
           notificationTitle = 'Order Cancelled';
-          notificationMessage = `Your order #${order.order_id} has been cancelled. Contact support for more information.`;
+          notificationMessage = `Your order #${order.order_id || order.id} has been cancelled. Contact support for more information.`;
           break;
         default:
-          notificationMessage = `Your order #${order.order_id} status has been updated to: ${status}`;
+          notificationMessage = `Your order #${order.order_id || order.id} status has been updated to: ${status}`;
       }
 
       const notifQuery = `
@@ -521,7 +543,7 @@ const cancelOrder = async (req, res) => {
       await pool.query(notifQuery, [
         order.user_id, 
         'Order Cancelled', 
-        `Your order #${order.order_id} has been cancelled.`,
+        `Your order #${order.order_id || order.id} has been cancelled.`,
         'order'
       ]);
     } catch (notifError) {
@@ -571,7 +593,6 @@ const getOrderStats = async (req, res) => {
         WHERE created_at >= NOW() - INTERVAL '7 days'
       `;
     } else {
-      // If no created_at, return zeros
       todayQuery = `SELECT 0 as today_orders, 0 as today_revenue`;
       weekQuery = `SELECT 0 as week_orders, 0 as week_revenue`;
     }
@@ -590,10 +611,7 @@ const getOrderStats = async (req, res) => {
       FROM orders
     `);
 
-    // Get today's orders
     const todayResult = await pool.query(todayQuery);
-
-    // Get weekly stats
     const weekResult = await pool.query(weekQuery);
 
     console.log('Statistics fetched successfully');
@@ -650,10 +668,8 @@ const getRecentOrders = async (req, res) => {
     }
 
     const result = await pool.query(query, [limit]);
-
     console.log(`Found ${result.rows.length} recent orders`);
 
-    // Parse products for each order
     const orders = result.rows.map(order => {
       try {
         return {
