@@ -18,6 +18,7 @@ const generateProductId = () => {
 // @access  Public
 const getProducts = async (req, res) => {
   try {
+    console.log('Getting all products');
     const products = await Product.findAll();
     res.json({
       success: true,
@@ -28,7 +29,7 @@ const getProducts = async (req, res) => {
     console.error('Get products error:', err.message);
     res.status(500).json({ 
       success: false,
-      message: 'Server error' 
+      message: 'Server error: ' + err.message
     });
   }
 };
@@ -38,7 +39,25 @@ const getProducts = async (req, res) => {
 // @access  Public
 const getProductById = async (req, res) => {
   try {
-    const product = await Product.findById(req.params.id);
+    const { id } = req.params;
+    
+    // Check if ID contains colon and clean it (fixes the 14:1 issue)
+    let cleanId = id;
+    if (id.includes(':')) {
+      cleanId = id.split(':')[0];
+      console.log(`Cleaned product ID from ${id} to ${cleanId}`);
+    }
+    
+    // Validate that cleanId is a number
+    const productId = parseInt(cleanId);
+    if (isNaN(productId)) {
+      return res.status(400).json({ 
+        success: false,
+        message: 'Invalid product ID format' 
+      });
+    }
+    
+    const product = await Product.findById(productId);
     
     if (!product) {
       return res.status(404).json({ 
@@ -55,7 +74,7 @@ const getProductById = async (req, res) => {
     console.error('Get product error:', err.message);
     res.status(500).json({ 
       success: false,
-      message: 'Server error' 
+      message: 'Server error: ' + err.message
     });
   }
 };
@@ -82,7 +101,7 @@ const getProductByCode = async (req, res) => {
     console.error('Get product by code error:', err.message);
     res.status(500).json({ 
       success: false,
-      message: 'Server error' 
+      message: 'Server error: ' + err.message
     });
   }
 };
@@ -103,7 +122,7 @@ const getProductsByCategory = async (req, res) => {
     console.error('Get products by category error:', err.message);
     res.status(500).json({ 
       success: false,
-      message: 'Server error' 
+      message: 'Server error: ' + err.message
     });
   }
 };
@@ -134,7 +153,7 @@ const searchProducts = async (req, res) => {
     console.error('Search products error:', err.message);
     res.status(500).json({ 
       success: false,
-      message: 'Server error' 
+      message: 'Server error: ' + err.message
     });
   }
 };
@@ -184,7 +203,7 @@ const createProduct = async (req, res) => {
     console.error('Create product error:', err.message);
     res.status(500).json({ 
       success: false,
-      message: 'Server error' 
+      message: 'Server error: ' + err.message
     });
   }
 };
@@ -284,7 +303,7 @@ const updateProduct = async (req, res) => {
     console.error('Update product error:', err.message);
     res.status(500).json({ 
       success: false,
-      message: 'Server error' 
+      message: 'Server error: ' + err.message
     });
   }
 };
@@ -296,7 +315,7 @@ const deleteProduct = async (req, res) => {
   try {
     const productId = req.params.id;
 
-    // Check if product exists and get images
+    // Check if product exists
     const product = await Product.findById(productId);
     if (!product) {
       return res.status(404).json({ 
@@ -305,12 +324,45 @@ const deleteProduct = async (req, res) => {
       });
     }
 
+    // First delete any favorites that reference this product
+    try {
+      // Check if favorites table exists
+      const tableCheck = await pool.query(`
+        SELECT EXISTS (
+          SELECT FROM information_schema.tables 
+          WHERE table_name = 'favorites'
+        );
+      `);
+      
+      if (tableCheck.rows[0].exists) {
+        await pool.query('DELETE FROM favorites WHERE product_id = $1', [productId]);
+        console.log(`Deleted favorites for product ${productId}`);
+      }
+    } catch (favError) {
+      console.log('Favorites table might not exist or other error:', favError.message);
+      // Continue with deletion even if favorites table doesn't exist
+    }
+
+    // Also check for orders that might reference this product
+    try {
+      // This is more complex - products in orders are stored as JSON
+      // We'll just log a warning instead of blocking deletion
+      console.log(`Note: Product ${productId} may exist in order histories`);
+    } catch (orderError) {
+      console.log('Error checking orders:', orderError.message);
+    }
+
     // Delete associated images from filesystem
     if (product.images && product.images.length > 0) {
       product.images.forEach(imagePath => {
-        const fullPath = path.join(__dirname, '..', imagePath);
-        if (fs.existsSync(fullPath)) {
-          fs.unlinkSync(fullPath);
+        try {
+          const fullPath = path.join(__dirname, '..', imagePath);
+          if (fs.existsSync(fullPath)) {
+            fs.unlinkSync(fullPath);
+            console.log(`Deleted image: ${fullPath}`);
+          }
+        } catch (fileError) {
+          console.error('Error deleting image file:', fileError.message);
         }
       });
     }
@@ -324,9 +376,18 @@ const deleteProduct = async (req, res) => {
     });
   } catch (err) {
     console.error('Delete product error:', err.message);
+    
+    // Check if it's a foreign key constraint error
+    if (err.code === '23503') {
+      return res.status(400).json({ 
+        success: false,
+        message: 'Cannot delete product because it is referenced in orders or favorites. You may need to delete those records first.' 
+      });
+    }
+    
     res.status(500).json({ 
       success: false,
-      message: 'Server error' 
+      message: 'Server error: ' + err.message
     });
   }
 };
@@ -336,9 +397,21 @@ const deleteProduct = async (req, res) => {
 // @access  Public
 const getFeaturedProducts = async (req, res) => {
   try {
-    const result = await pool.query(
-      'SELECT * FROM products WHERE rating >= 4.5 ORDER BY created_at DESC LIMIT 10'
-    );
+    // Check if created_at column exists
+    const columnCheck = await pool.query(`
+      SELECT column_name 
+      FROM information_schema.columns 
+      WHERE table_name='products' AND column_name='created_at'
+    `);
+    
+    let query;
+    if (columnCheck.rows.length > 0) {
+      query = 'SELECT * FROM products WHERE rating >= 4.5 ORDER BY created_at DESC LIMIT 10';
+    } else {
+      query = 'SELECT * FROM products WHERE rating >= 4.5 ORDER BY id DESC LIMIT 10';
+    }
+    
+    const result = await pool.query(query);
 
     res.json({
       success: true,
@@ -349,7 +422,7 @@ const getFeaturedProducts = async (req, res) => {
     console.error('Get featured products error:', err.message);
     res.status(500).json({ 
       success: false,
-      message: 'Server error' 
+      message: 'Server error: ' + err.message
     });
   }
 };
@@ -375,7 +448,7 @@ const getProductsByPriceRange = async (req, res) => {
     console.error('Get products by price range error:', err.message);
     res.status(500).json({ 
       success: false,
-      message: 'Server error' 
+      message: 'Server error: ' + err.message
     });
   }
 };
@@ -409,7 +482,7 @@ const updateProductStock = async (req, res) => {
     console.error('Update product stock error:', err.message);
     res.status(500).json({ 
       success: false,
-      message: 'Server error' 
+      message: 'Server error: ' + err.message
     });
   }
 };
