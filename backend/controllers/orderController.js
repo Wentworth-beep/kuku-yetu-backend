@@ -3,7 +3,6 @@ const pool = require('../config/database');
 const generateOrderNumber = () => {
   return 'ORD-' + Date.now() + '-' + Math.random().toString(36).substr(2, 6).toUpperCase();
 };
-
 const createOrder = async (req, res) => {
   try {
     console.log('🔵 Creating order for user:', req.user.id);
@@ -20,6 +19,81 @@ const createOrder = async (req, res) => {
         message: 'Missing required fields' 
       });
     }
+
+    // GENERATE ORDER NUMBER - THIS IS CRITICAL
+    const order_number = 'ORD-' + Date.now() + '-' + Math.random().toString(36).substr(2, 6).toUpperCase();
+    console.log('📋 Generated order_number:', order_number);
+
+    const productsJson = JSON.stringify(products);
+    const cleanTotal = parseFloat(total_amount);
+
+    // Log each value before insert
+    console.log('📝 Values to insert:');
+    console.log('   order_number:', order_number);
+    console.log('   user_id:', req.user.id);
+    console.log('   customer_name:', customer_name);
+    console.log('   phone:', phone);
+    console.log('   alternative_phone:', alternative_phone || null);
+    console.log('   location:', location);
+    console.log('   specific_address:', specific_address || null);
+    console.log('   products:', productsJson.substring(0, 100) + '...');
+    console.log('   total_amount:', cleanTotal);
+
+    const query = `
+      INSERT INTO orders 
+      (order_number, user_id, customer_name, phone, alternative_phone, 
+       location, specific_address, products, total_amount)
+      VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+      RETURNING *
+    `;
+
+    const values = [
+      order_number,  // $1 - MUST NOT BE NULL
+      req.user.id,   // $2
+      customer_name, // $3
+      phone,         // $4
+      alternative_phone || null, // $5
+      location,      // $6
+      specific_address || null,  // $7
+      productsJson,  // $8
+      cleanTotal     // $9
+    ];
+
+    console.log('📝 Executing query with', values.length, 'parameters');
+    console.log('📝 Full values array:', JSON.stringify(values));
+
+    const result = await pool.query(query, values);
+    const newOrder = result.rows[0];
+    
+    console.log('✅ Order created successfully! ID:', newOrder.id, 'Number:', newOrder.order_number);
+
+    // Try notification
+    try {
+      await pool.query(
+        `INSERT INTO notifications (user_id, title, message, type) 
+         VALUES ($1, $2, $3, $4)`,
+        [req.user.id, 'Order Received', `Order #${order_number} received`, 'order']
+      );
+      console.log('✅ Notification sent');
+    } catch (e) {
+      console.log('⚠️ Notification not sent:', e.message);
+    }
+
+    res.json({
+      success: true,
+      message: 'Order created successfully',
+      order: newOrder
+    });
+
+  } catch (err) {
+    console.error('❌ ERROR:', err);
+    console.error('❌ Error stack:', err.stack);
+    res.status(500).json({ 
+      success: false, 
+      message: err.message 
+    });
+  }
+};
 
     const order_number = generateOrderNumber();
     const productsJson = JSON.stringify(products);
