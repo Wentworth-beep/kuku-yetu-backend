@@ -10,7 +10,7 @@ const generateOrderId = () => {
 // @access  Private
 const createOrder = async (req, res) => {
   try {
-    console.log('🔵 Creating new order for user:', req.user.id);
+    console.log('Creating new order for user:', req.user.id);
     console.log('Order data:', JSON.stringify(req.body, null, 2));
 
     const {
@@ -35,7 +35,7 @@ const createOrder = async (req, res) => {
 
     // Generate order ID
     const order_id = generateOrderId();
-    console.log('📦 Generated order_id:', order_id);
+    console.log('Generated order_id:', order_id);
 
     // Clean and prepare data
     const cleanProducts = products.map(p => ({
@@ -72,42 +72,43 @@ const createOrder = async (req, res) => {
 
     const result = await pool.query(query, values);
     const newOrder = result.rows[0];
-    console.log('✅ Order inserted successfully:', newOrder.order_id);
+    console.log('Order inserted successfully:', newOrder.order_id);
 
     // Create notification for new order
-    const notifQuery = `
-      INSERT INTO notifications (user_id, title, message, type, is_read, created_at)
-      VALUES ($1, $2, $3, $4, false, NOW())
-      RETURNING *
-    `;
-    
-    const notifResult = await pool.query(notifQuery, [
-      req.user.id,
-      '🛒 Order Received',
-      `Your order #${order_id} has been received and is pending confirmation.`,
-      'order'
-    ]);
-    
-    console.log(`✅ Order received notification created for user ${req.user.id}`);
+    try {
+      const notifQuery = `
+        INSERT INTO notifications (user_id, title, message, type, is_read, created_at)
+        VALUES ($1, $2, $3, $4, false, NOW())
+        RETURNING *
+      `;
+      
+      await pool.query(notifQuery, [
+        req.user.id,
+        'Order Received',
+        `Your order #${order_id} has been received and is pending confirmation.`,
+        'order'
+      ]);
+      
+      console.log('Order received notification created for user', req.user.id);
+    } catch (notifError) {
+      console.error('Failed to create notification:', notifError.message);
+      // Don't fail the order if notification fails
+    }
 
-   // Parse products for response
-let parsedProducts = [];
-try {
-  // Check if products is already an object or needs parsing
-  if (typeof newOrder.products === 'string') {
-    parsedProducts = JSON.parse(newOrder.products);
-  } else {
-    parsedProducts = newOrder.products;
-  }
-} catch (e) {
-  console.error('Error parsing products:', e.message);
-  parsedProducts = [];
-}
+    // Parse products for response
+    let parsedProducts = [];
+    try {
+      parsedProducts = typeof newOrder.products === 'string' ? JSON.parse(newOrder.products) : newOrder.products;
+    } catch (e) {
+      console.error('Error parsing products for response:', e.message);
+      parsedProducts = [];
+    }
 
-const orderResponse = {
-  ...newOrder,
-  products: parsedProducts
-};
+    const orderResponse = {
+      ...newOrder,
+      products: parsedProducts
+    };
+
     res.status(201).json({
       success: true,
       message: 'Order created successfully',
@@ -115,7 +116,7 @@ const orderResponse = {
     });
 
   } catch (err) {
-    console.error('❌ Create order error:', err);
+    console.error('Create order error:', err);
     res.status(500).json({ 
       success: false,
       message: 'Server error: ' + err.message 
@@ -128,24 +129,65 @@ const orderResponse = {
 // @access  Private/Admin
 const getAllOrders = async (req, res) => {
   try {
-    console.log('🔵 Fetching all orders for admin');
-
-    const query = `
-      SELECT o.*, u.full_name as user_name, u.email as user_email
-      FROM orders o 
-      LEFT JOIN users u ON o.user_id = u.id 
-      ORDER BY o.created_at DESC
-    `;
+    console.log('Fetching all orders for admin');
+    
+    // First check if orders table exists
+    const tableCheck = await pool.query(`
+      SELECT EXISTS (
+        SELECT FROM information_schema.tables 
+        WHERE table_name = 'orders'
+      );
+    `);
+    
+    if (!tableCheck.rows[0].exists) {
+      console.log('Orders table does not exist');
+      return res.json({
+        success: true,
+        count: 0,
+        orders: []
+      });
+    }
+    
+    // Check if created_at column exists
+    const columnCheck = await pool.query(`
+      SELECT column_name 
+      FROM information_schema.columns 
+      WHERE table_name='orders' AND column_name='created_at'
+    `);
+    
+    let query;
+    if (columnCheck.rows.length > 0) {
+      // created_at exists - use it for ordering
+      query = `
+        SELECT o.*, u.full_name as user_name, u.email as user_email
+        FROM orders o 
+        LEFT JOIN users u ON o.user_id = u.id 
+        ORDER BY o.created_at DESC
+      `;
+    } else {
+      // created_at doesn't exist - order by id instead
+      console.log('created_at column missing, ordering by id');
+      query = `
+        SELECT o.*, u.full_name as user_name, u.email as user_email
+        FROM orders o 
+        LEFT JOIN users u ON o.user_id = u.id 
+        ORDER BY o.id DESC
+      `;
+    }
     
     const result = await pool.query(query);
-    console.log(`✅ Found ${result.rows.length} orders`);
+    console.log(`Found ${result.rows.length} orders`);
 
-    // Parse products for each order
+    // Safely parse products for each order
     const parsedOrders = result.rows.map(order => {
       try {
+        let products = order.products;
+        if (typeof products === 'string') {
+          products = JSON.parse(products);
+        }
         return {
           ...order,
-          products: typeof order.products === 'string' ? JSON.parse(order.products) : order.products
+          products: products || []
         };
       } catch (e) {
         console.error('Error parsing products for order', order.id, ':', e.message);
@@ -162,7 +204,7 @@ const getAllOrders = async (req, res) => {
       orders: parsedOrders
     });
   } catch (err) {
-    console.error('❌ Get all orders error:', err);
+    console.error('Get all orders error:', err);
     res.status(500).json({ 
       success: false,
       message: 'Server error: ' + err.message 
@@ -175,23 +217,39 @@ const getAllOrders = async (req, res) => {
 // @access  Private
 const getUserOrders = async (req, res) => {
   try {
-    console.log('🔵 Fetching orders for user:', req.user.id);
+    console.log('Fetching orders for user:', req.user.id);
 
-    const query = `
-      SELECT * FROM orders 
-      WHERE user_id = $1 
-      ORDER BY created_at DESC
-    `;
+    // Check if created_at column exists
+    const columnCheck = await pool.query(`
+      SELECT column_name 
+      FROM information_schema.columns 
+      WHERE table_name='orders' AND column_name='created_at'
+    `);
+    
+    let query;
+    if (columnCheck.rows.length > 0) {
+      query = `
+        SELECT * FROM orders 
+        WHERE user_id = $1 
+        ORDER BY created_at DESC
+      `;
+    } else {
+      query = `
+        SELECT * FROM orders 
+        WHERE user_id = $1 
+        ORDER BY id DESC
+      `;
+    }
     
     const result = await pool.query(query, [req.user.id]);
-    console.log(`✅ Found ${result.rows.length} orders for user ${req.user.id}`);
+    console.log(`Found ${result.rows.length} orders for user ${req.user.id}`);
 
     // Parse products for each order
     const parsedOrders = result.rows.map(order => {
       try {
         return {
           ...order,
-          products: typeof order.products === 'string' ? JSON.parse(order.products) : order.products
+          products: typeof order.products === 'string' ? JSON.parse(order.products) : (order.products || [])
         };
       } catch (e) {
         console.error('Error parsing products for order', order.id, ':', e.message);
@@ -208,7 +266,7 @@ const getUserOrders = async (req, res) => {
       orders: parsedOrders
     });
   } catch (err) {
-    console.error('❌ Get user orders error:', err);
+    console.error('Get user orders error:', err);
     res.status(500).json({ 
       success: false,
       message: 'Server error: ' + err.message 
@@ -222,7 +280,16 @@ const getUserOrders = async (req, res) => {
 const getOrderById = async (req, res) => {
   try {
     const orderId = req.params.id;
-    console.log('🔵 Fetching order:', orderId, 'for user:', req.user.id);
+    
+    // Validate that orderId is a number
+    if (isNaN(parseInt(orderId))) {
+      return res.status(400).json({ 
+        success: false,
+        message: 'Invalid order ID format' 
+      });
+    }
+    
+    console.log('Fetching order:', orderId, 'for user:', req.user.id);
 
     const query = 'SELECT * FROM orders WHERE id = $1';
     const result = await pool.query(query, [orderId]);
@@ -263,7 +330,7 @@ const getOrderById = async (req, res) => {
       order: parsedOrder
     });
   } catch (err) {
-    console.error('❌ Get order error:', err);
+    console.error('Get order error:', err);
     res.status(500).json({ 
       success: false,
       message: 'Server error: ' + err.message 
@@ -279,7 +346,7 @@ const updateOrderStatus = async (req, res) => {
     const { status } = req.body;
     const orderId = req.params.id;
 
-    console.log(`🔵 Updating order ${orderId} to status: ${status}`);
+    console.log(`Updating order ${orderId} to status: ${status}`);
 
     // Validate status
     const validStatuses = ['pending', 'confirmed', 'shipped', 'delivered', 'completed', 'cancelled'];
@@ -306,53 +373,54 @@ const updateOrderStatus = async (req, res) => {
     const updateResult = await pool.query(updateQuery, [status, orderId]);
     const updatedOrder = updateResult.rows[0];
 
-    console.log(`✅ Order ${orderId} status updated to ${status}`);
+    console.log(`Order ${orderId} status updated to ${status}`);
 
     // Create notification for user based on status
-    let notificationTitle = '';
-    let notificationMessage = '';
-    
-    switch (status) {
-      case 'confirmed':
-        notificationTitle = '✅ Order Confirmed';
-        notificationMessage = `Your order #${order.order_id} has been confirmed and is being processed.`;
-        break;
-      case 'shipped':
-        notificationTitle = '🚚 Order Shipped';
-        notificationMessage = `Great news! Your order #${order.order_id} has been shipped and is on its way!`;
-        break;
-      case 'delivered':
-        notificationTitle = '📦 Order Delivered';
-        notificationMessage = `Your order #${order.order_id} has been delivered. Thank you for shopping with us!`;
-        break;
-      case 'completed':
-        notificationTitle = '✨ Order Completed';
-        notificationMessage = `Your order #${order.order_id} is now complete. We hope you enjoy your products!`;
-        break;
-      case 'cancelled':
-        notificationTitle = '❌ Order Cancelled';
-        notificationMessage = `Your order #${order.order_id} has been cancelled. Contact support for more information.`;
-        break;
-      default:
-        notificationTitle = '📝 Order Update';
-        notificationMessage = `Your order #${order.order_id} status has been updated to: ${status}`;
-    }
+    try {
+      let notificationTitle = 'Order Update';
+      let notificationMessage = '';
+      
+      switch (status) {
+        case 'confirmed':
+          notificationTitle = 'Order Confirmed';
+          notificationMessage = `Your order #${order.order_id} has been confirmed and is being processed.`;
+          break;
+        case 'shipped':
+          notificationTitle = 'Order Shipped';
+          notificationMessage = `Great news! Your order #${order.order_id} has been shipped and is on its way!`;
+          break;
+        case 'delivered':
+          notificationTitle = 'Order Delivered';
+          notificationMessage = `Your order #${order.order_id} has been delivered. Thank you for shopping with us!`;
+          break;
+        case 'completed':
+          notificationTitle = 'Order Completed';
+          notificationMessage = `Your order #${order.order_id} is now complete. We hope you enjoy your products!`;
+          break;
+        case 'cancelled':
+          notificationTitle = 'Order Cancelled';
+          notificationMessage = `Your order #${order.order_id} has been cancelled. Contact support for more information.`;
+          break;
+        default:
+          notificationMessage = `Your order #${order.order_id} status has been updated to: ${status}`;
+      }
 
-    // Insert notification
-    const notifQuery = `
-      INSERT INTO notifications (user_id, title, message, type, is_read, created_at)
-      VALUES ($1, $2, $3, $4, false, NOW())
-      RETURNING *
-    `;
-    
-    const notifResult = await pool.query(notifQuery, [
-      order.user_id,
-      notificationTitle,
-      notificationMessage,
-      'order'
-    ]);
-    
-    console.log(`✅ Notification created for user ${order.user_id}: ${notificationTitle}`);
+      const notifQuery = `
+        INSERT INTO notifications (user_id, title, message, type, is_read, created_at)
+        VALUES ($1, $2, $3, $4, false, NOW())
+      `;
+      
+      await pool.query(notifQuery, [
+        order.user_id,
+        notificationTitle,
+        notificationMessage,
+        'order'
+      ]);
+      
+      console.log(`Notification created for user ${order.user_id}`);
+    } catch (notifError) {
+      console.error('Failed to create notification:', notifError.message);
+    }
 
     // Parse products for response
     let parsedProducts = [];
@@ -373,7 +441,7 @@ const updateOrderStatus = async (req, res) => {
       order: parsedOrder
     });
   } catch (err) {
-    console.error('❌ Update order status error:', err);
+    console.error('Update order status error:', err);
     res.status(500).json({ 
       success: false,
       message: 'Server error: ' + err.message 
@@ -387,7 +455,7 @@ const updateOrderStatus = async (req, res) => {
 const cancelOrder = async (req, res) => {
   try {
     const orderId = req.params.id;
-    console.log('🔵 Cancelling order:', orderId, 'by user:', req.user.id);
+    console.log('Cancelling order:', orderId, 'by user:', req.user.id);
 
     // Check if order exists
     const checkQuery = 'SELECT * FROM orders WHERE id = $1';
@@ -423,20 +491,24 @@ const cancelOrder = async (req, res) => {
     const updateResult = await pool.query(updateQuery, ['cancelled', orderId]);
     const updatedOrder = updateResult.rows[0];
 
-    console.log('✅ Order cancelled successfully');
+    console.log('Order cancelled successfully');
 
     // Create notification
-    const notifQuery = `
-      INSERT INTO notifications (user_id, title, message, type, is_read, created_at)
-      VALUES ($1, $2, $3, $4, false, NOW())
-    `;
-    
-    await pool.query(notifQuery, [
-      order.user_id, 
-      '❌ Order Cancelled', 
-      `Your order #${order.order_id} has been cancelled.`,
-      'order'
-    ]);
+    try {
+      const notifQuery = `
+        INSERT INTO notifications (user_id, title, message, type, is_read, created_at)
+        VALUES ($1, $2, $3, $4, false, NOW())
+      `;
+      
+      await pool.query(notifQuery, [
+        order.user_id, 
+        'Order Cancelled', 
+        `Your order #${order.order_id} has been cancelled.`,
+        'order'
+      ]);
+    } catch (notifError) {
+      console.error('Failed to create notification:', notifError.message);
+    }
 
     res.json({
       success: true,
@@ -444,7 +516,7 @@ const cancelOrder = async (req, res) => {
       order: updatedOrder
     });
   } catch (err) {
-    console.error('❌ Cancel order error:', err);
+    console.error('Cancel order error:', err);
     res.status(500).json({ 
       success: false,
       message: 'Server error: ' + err.message 
@@ -457,7 +529,34 @@ const cancelOrder = async (req, res) => {
 // @access  Private/Admin
 const getOrderStats = async (req, res) => {
   try {
-    console.log('🔵 Fetching order statistics');
+    console.log('Fetching order statistics');
+
+    // Check if created_at column exists
+    const columnCheck = await pool.query(`
+      SELECT column_name 
+      FROM information_schema.columns 
+      WHERE table_name='orders' AND column_name='created_at'
+    `);
+    
+    let todayQuery, weekQuery;
+    
+    if (columnCheck.rows.length > 0) {
+      todayQuery = `
+        SELECT COUNT(*) as today_orders, COALESCE(SUM(total_amount), 0) as today_revenue
+        FROM orders 
+        WHERE DATE(created_at) = CURRENT_DATE
+      `;
+      
+      weekQuery = `
+        SELECT COUNT(*) as week_orders, COALESCE(SUM(total_amount), 0) as week_revenue
+        FROM orders 
+        WHERE created_at >= NOW() - INTERVAL '7 days'
+      `;
+    } else {
+      // If no created_at, return zeros
+      todayQuery = `SELECT 0 as today_orders, 0 as today_revenue`;
+      weekQuery = `SELECT 0 as week_orders, 0 as week_revenue`;
+    }
 
     const result = await pool.query(`
       SELECT 
@@ -474,20 +573,12 @@ const getOrderStats = async (req, res) => {
     `);
 
     // Get today's orders
-    const todayResult = await pool.query(`
-      SELECT COUNT(*) as today_orders, COALESCE(SUM(total_amount), 0) as today_revenue
-      FROM orders 
-      WHERE DATE(created_at) = CURRENT_DATE
-    `);
+    const todayResult = await pool.query(todayQuery);
 
     // Get weekly stats
-    const weekResult = await pool.query(`
-      SELECT COUNT(*) as week_orders, COALESCE(SUM(total_amount), 0) as week_revenue
-      FROM orders 
-      WHERE created_at >= NOW() - INTERVAL '7 days'
-    `);
+    const weekResult = await pool.query(weekQuery);
 
-    console.log('✅ Statistics fetched successfully');
+    console.log('Statistics fetched successfully');
 
     res.json({
       success: true,
@@ -498,7 +589,7 @@ const getOrderStats = async (req, res) => {
       }
     });
   } catch (err) {
-    console.error('❌ Get order stats error:', err);
+    console.error('Get order stats error:', err);
     res.status(500).json({ 
       success: false,
       message: 'Server error: ' + err.message 
@@ -512,17 +603,37 @@ const getOrderStats = async (req, res) => {
 const getRecentOrders = async (req, res) => {
   try {
     const limit = parseInt(req.params.limit) || 10;
-    console.log(`🔵 Fetching recent ${limit} orders`);
+    console.log(`Fetching recent ${limit} orders`);
 
-    const result = await pool.query(`
-      SELECT o.*, u.full_name as user_name, u.email as user_email
-      FROM orders o 
-      LEFT JOIN users u ON o.user_id = u.id 
-      ORDER BY o.created_at DESC 
-      LIMIT $1
-    `, [limit]);
+    // Check if created_at column exists
+    const columnCheck = await pool.query(`
+      SELECT column_name 
+      FROM information_schema.columns 
+      WHERE table_name='orders' AND column_name='created_at'
+    `);
+    
+    let query;
+    if (columnCheck.rows.length > 0) {
+      query = `
+        SELECT o.*, u.full_name as user_name, u.email as user_email
+        FROM orders o 
+        LEFT JOIN users u ON o.user_id = u.id 
+        ORDER BY o.created_at DESC 
+        LIMIT $1
+      `;
+    } else {
+      query = `
+        SELECT o.*, u.full_name as user_name, u.email as user_email
+        FROM orders o 
+        LEFT JOIN users u ON o.user_id = u.id 
+        ORDER BY o.id DESC 
+        LIMIT $1
+      `;
+    }
 
-    console.log(`✅ Found ${result.rows.length} recent orders`);
+    const result = await pool.query(query, [limit]);
+
+    console.log(`Found ${result.rows.length} recent orders`);
 
     // Parse products for each order
     const orders = result.rows.map(order => {
@@ -532,7 +643,7 @@ const getRecentOrders = async (req, res) => {
           products: typeof order.products === 'string' ? JSON.parse(order.products) : order.products
         };
       } catch (e) {
-        console.error('Error parsing products for order', order.id, ':', e.message);
+        console.error('Error parsing products for order', order.id);
         return {
           ...order,
           products: []
@@ -546,7 +657,7 @@ const getRecentOrders = async (req, res) => {
       orders
     });
   } catch (err) {
-    console.error('❌ Get recent orders error:', err);
+    console.error('Get recent orders error:', err);
     res.status(500).json({ 
       success: false,
       message: 'Server error: ' + err.message 
