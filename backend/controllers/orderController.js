@@ -1,6 +1,6 @@
 const pool = require('../config/database');
 
-const generateOrderId = () => {
+const generateOrderNumber = () => {
   return 'ORD-' + Date.now() + '-' + Math.random().toString(36).substr(2, 6).toUpperCase();
 };
 
@@ -14,7 +14,6 @@ const createOrder = async (req, res) => {
       location, specific_address, products, total_amount
     } = req.body;
 
-    // Validation
     if (!customer_name || !phone || !location || !products || !total_amount) {
       return res.status(400).json({ 
         success: false, 
@@ -22,86 +21,48 @@ const createOrder = async (req, res) => {
       });
     }
 
-    const order_id = generateOrderId();
+    const order_number = generateOrderNumber();
     const productsJson = JSON.stringify(products);
     const cleanTotal = parseFloat(total_amount);
 
-    // First, check which columns exist
-    const columns = await pool.query(`
-      SELECT column_name 
-      FROM information_schema.columns 
-      WHERE table_name='orders'
-    `);
-    
-    const columnNames = columns.rows.map(col => col.column_name);
-    console.log('📊 Available columns:', columnNames);
-
-    // Build query dynamically based on existing columns
-    let insertColumns = ['user_id', 'customer_name', 'phone', 'location', 'products', 'total_amount', 'status'];
-    let insertValues = [req.user.id, customer_name, phone, location, productsJson, cleanTotal, 'pending'];
-    let placeholders = ['$1', '$2', '$3', '$4', '$5', '$6', '$7'];
-    let paramCount = 7;
-
-    // Add order_id if column exists
-    if (columnNames.includes('order_id')) {
-      insertColumns.push('order_id');
-      insertValues.push(order_id);
-      placeholders.push(`$${++paramCount}`);
-    }
-
-    // Add alternative_phone if column exists AND value provided
-    if (columnNames.includes('alternative_phone') && alternative_phone) {
-      insertColumns.push('alternative_phone');
-      insertValues.push(alternative_phone);
-      placeholders.push(`$${++paramCount}`);
-    }
-
-    // Add specific_address if column exists AND value provided
-    if (columnNames.includes('specific_address') && specific_address) {
-      insertColumns.push('specific_address');
-      insertValues.push(specific_address);
-      placeholders.push(`$${++paramCount}`);
-    }
-
-    // Add created_at if column exists
-    if (columnNames.includes('created_at')) {
-      insertColumns.push('created_at');
-      placeholders.push('NOW()');
-    }
-
+    // EXACT columns matching your table
     const query = `
-      INSERT INTO orders (${insertColumns.join(', ')})
-      VALUES (${placeholders.join(', ')})
+      INSERT INTO orders 
+      (order_number, user_id, customer_name, phone, alternative_phone, 
+       location, specific_address, products, total_amount)
+      VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
       RETURNING *
     `;
 
-    console.log('📝 Query:', query);
-    console.log('📝 Values:', insertValues);
+    const values = [
+      order_number,
+      req.user.id,
+      customer_name,
+      phone,
+      alternative_phone || null,
+      location,
+      specific_address || null,
+      productsJson,
+      cleanTotal
+    ];
 
-    const result = await pool.query(query, insertValues);
-    
-    // Add order_id to response if it wasn't in DB
+    console.log('📝 Inserting with 9 parameters');
+    console.log('📝 Values:', values);
+
+    const result = await pool.query(query, values);
     const newOrder = result.rows[0];
-    if (!newOrder.order_id) {
-      newOrder.order_id = order_id;
-    }
     
-    console.log('✅ Order created successfully. ID:', newOrder.id);
+    console.log('✅ Order created. ID:', newOrder.id, 'Number:', newOrder.order_number);
 
-    // Try to create notification
+    // Try notification
     try {
-      const notifQuery = `
-        INSERT INTO notifications (user_id, title, message, type, is_read, created_at)
-        VALUES ($1, $2, $3, $4, false, NOW())
-      `;
-      await pool.query(notifQuery, [
-        req.user.id,
-        'Order Received',
-        `Your order #${order_id} has been received.`,
-        'order'
-      ]);
-    } catch (notifErr) {
-      console.log('⚠️ Notification not sent:', notifErr.message);
+      await pool.query(
+        `INSERT INTO notifications (user_id, title, message, type) 
+         VALUES ($1, $2, $3, $4)`,
+        [req.user.id, 'Order Received', `Order #${order_number} received`, 'order']
+      );
+    } catch (e) {
+      console.log('⚠️ Notification not sent:', e.message);
     }
 
     res.json({
@@ -111,7 +72,7 @@ const createOrder = async (req, res) => {
     });
 
   } catch (err) {
-    console.error('❌ Order error:', err);
+    console.error('❌ ERROR:', err);
     res.status(500).json({ 
       success: false, 
       message: err.message 
@@ -119,9 +80,7 @@ const createOrder = async (req, res) => {
   }
 };
 
-// Keep all other functions as they were in the previous version
-// ... (rest of the file remains the same)
-
+// Keep other functions simple
 module.exports = {
   createOrder,
   getAllOrders: async (req, res) => {
@@ -167,7 +126,18 @@ module.exports = {
   },
   getOrderStats: async (req, res) => {
     try {
-      const result = await pool.query('SELECT COUNT(*) as total FROM orders');
+      const result = await pool.query(`
+        SELECT 
+          COUNT(*) as total_orders,
+          COUNT(CASE WHEN status = 'pending' THEN 1 END) as pending_orders,
+          COUNT(CASE WHEN status = 'confirmed' THEN 1 END) as confirmed_orders,
+          COUNT(CASE WHEN status = 'shipped' THEN 1 END) as shipped_orders,
+          COUNT(CASE WHEN status = 'delivered' THEN 1 END) as delivered_orders,
+          COUNT(CASE WHEN status = 'completed' THEN 1 END) as completed_orders,
+          COUNT(CASE WHEN status = 'cancelled' THEN 1 END) as cancelled_orders,
+          COALESCE(SUM(total_amount), 0) as total_revenue
+        FROM orders
+      `);
       res.json({ success: true, stats: result.rows[0] });
     } catch (err) {
       res.status(500).json({ success: false, message: err.message });
